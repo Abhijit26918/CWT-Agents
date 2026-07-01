@@ -1,0 +1,13 @@
+{
+  "markets": [
+    {
+      "ticker": "KXBTCD-25JUN2700T00-U",
+      "event_ticker": "KXBTCD-25JUN2700T00",
+      "subtitle": "BTC Up",
+      "yes_bid": 50,
+      "yes_ask": 56,
+      "status": "open",
+      "close_time": "2025-06-27T06:00:00Z"
+    }
+  ]
+}

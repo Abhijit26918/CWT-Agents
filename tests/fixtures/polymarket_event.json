@@ -1,0 +1,17 @@
+[
+  {
+    "id": "501234",
+    "slug": "btc-updown-5m-1751000400",
+    "title": "BTC Up or Down in the next 5 minutes?",
+    "endDate": "2025-06-27T05:05:00Z",
+    "markets": [
+      {
+        "id": "701234",
+        "question": "Will BTC go up in 5 minutes?",
+        "outcomes": "[\"Up\",\"Down\"]",
+        "clobTokenIds": "[\"token_up_111\",\"token_down_222\"]",
+        "endDateIso": "2025-06-27T05:05:00Z"
+      }
+    ]
+  }
+]

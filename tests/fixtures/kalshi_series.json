@@ -1,0 +1,16 @@
+{
+  "series": [
+    {
+      "ticker": "KXBTCD",
+      "title": "Bitcoin Up/Down",
+      "category": "Crypto",
+      "frequency": "hourly"
+    },
+    {
+      "ticker": "KXETHD",
+      "title": "Ethereum Up/Down",
+      "category": "Crypto",
+      "frequency": "hourly"
+    }
+  ]
+}
