@@ -1,0 +1,29 @@
+assets: [BTC, ETH]
+symbols: { BTC: BTCUSDT, ETH: ETHUSDT }
+horizon: "5m"
+ohlcv_interval: "5m"
+ohlcv_limit: 1000
+
+kronos:
+  model: "NeoQuasar/Kronos-small"
+  tokenizer: "NeoQuasar/Kronos-Tokenizer-base"
+  device: "cpu"
+  lookback: 400
+  mc_samples: 30
+
+apify:
+  actor: "parseforge/binance-prices-scraper"
+
+risk:
+  bankroll_paper: 1000.0
+  kelly_multiplier: 0.25
+  f_max: 0.10
+  fee: 0.01
+
+llm:
+  provider: "openrouter"
+  model: "deepseek/deepseek-chat-v3.1:free"
+
+venues: [polymarket, kalshi]
+mode: "paper"
+db_path: "cwt.db"

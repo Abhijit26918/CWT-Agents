@@ -1,0 +1,15 @@
+# Phase 0 — lightweight, installed now
+pandas
+numpy
+requests
+python-dotenv
+pydantic
+pyyaml
+pytest
+responses
+
+# Later phases — installed when the corresponding module is built
+# apify-client       (Phase 2 — Data Agent)
+# torch               (Phase 2 — Kronos, via Kronos's own requirements.txt)
+# huggingface_hub     (Phase 2 — Kronos)
+# streamlit           (Phase 5 — dashboard)
