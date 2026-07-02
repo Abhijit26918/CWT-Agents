@@ -5,8 +5,10 @@ ohlcv_interval: "5m"
 ohlcv_limit: 1000
 
 kronos:
-  model: "NeoQuasar/Kronos-small"
-  tokenizer: "NeoQuasar/Kronos-Tokenizer-base"
+  # CPU-friendly option (recommended for laptops without GPU):
+  #   model: "NeoQuasar/Kronos-mini"  tokenizer: "NeoQuasar/Kronos-Tokenizer-2k"
+  model: "NeoQuasar/Kronos-mini"
+  tokenizer: "NeoQuasar/Kronos-Tokenizer-2k"
   device: "cpu"
   lookback: 400
   mc_samples: 30
