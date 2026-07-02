@@ -1,24 +1,33 @@
 """Headless entry point — no LLM. Demo, cron, and free testing.
 
-Phase 0: only --dry is implemented (loads config + secrets, prints a
-redacted summary, exits). --loop/--interval/--cache run the real pipeline
-and are wired in Phase 3 once core/pipeline.py exists.
+Usage:
+    python run_flow.py --dry           # print config and exit
+    python run_flow.py                 # run one cycle
+    python run_flow.py --cache         # use cached Apify data (dev mode)
+    python run_flow.py --loop --interval 300   # run every 5 minutes
 """
 from __future__ import annotations
 
 import argparse
 import json
+import time
 
 from core.config import load_config, load_settings
+from core.db import init_db
 from core.logging_setup import setup_logging
+from core.pipeline import run_once
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CWT crypto predictions — headless runner")
-    parser.add_argument("--dry", action="store_true", help="Load config/settings and exit, no pipeline run")
-    parser.add_argument("--cache", action="store_true", help="Reuse last cached Apify dataset instead of a live call")
-    parser.add_argument("--loop", action="store_true", help="Run continuously on --interval seconds")
-    parser.add_argument("--interval", type=int, default=300, help="Seconds between loop iterations")
+    parser.add_argument("--dry", action="store_true",
+                        help="Load config/settings, print summary, and exit")
+    parser.add_argument("--cache", action="store_true",
+                        help="Reuse last cached Apify dataset (no Apify credit spend)")
+    parser.add_argument("--loop", action="store_true",
+                        help="Run continuously on --interval seconds")
+    parser.add_argument("--interval", type=int, default=300,
+                        help="Seconds between loop iterations (default: 300)")
     args = parser.parse_args()
 
     run_id = setup_logging()
@@ -37,7 +46,23 @@ def main() -> None:
         print(json.dumps(redacted, indent=2))
         return
 
-    raise NotImplementedError("Phase 3 — Pipeline wiring (run_once / --loop)")
+    conn = init_db(cfg.db_path)
+
+    def _cycle():
+        report = run_once(cfg, conn, use_cache=args.cache)
+        print()
+        report.print_table()
+        print()
+
+    if args.loop:
+        print(f"Starting loop — running every {args.interval}s. Ctrl+C to stop.")
+        while True:
+            _cycle()
+            time.sleep(args.interval)
+    else:
+        _cycle()
+
+    conn.close()
 
 
 if __name__ == "__main__":
