@@ -73,23 +73,34 @@ def _find_soonest_event(series_ticker: str) -> dict:
         raise MarketNotIndexed(
             f"No open events found for Kalshi series {series_ticker}"
         )
-    return min(events, key=lambda e: e["close_time"])
+    # Real Kalshi API uses "strike_date"; fall back to "close_time" for older responses
+    def _sort_key(e: dict) -> str:
+        return e.get("strike_date") or e.get("close_time") or ""
+
+    return min(events, key=_sort_key)
 
 
 def _find_up_market(event_ticker: str) -> dict:
-    """Return the UP (YES = up) market for the given event."""
+    """Return the most informative market for the given event.
+
+    Kalshi crypto markets are price-level ladders ("Will BTC be above $X?").
+    We select the market whose YES mid-price is closest to 0.50 — this is the
+    'at the money' strike that best approximates P(up) for the upcoming window.
+    """
     data = _get("/markets", {"event_ticker": event_ticker})
     markets = data.get("markets", [])
     if not markets:
         raise MarketNotIndexed(
             f"No markets found for Kalshi event {event_ticker}"
         )
-    # Prefer a market whose subtitle/title signals "up"; fall back to first market.
-    up_market = next(
-        (m for m in markets if "up" in m.get("subtitle", "").lower()),
-        markets[0],
-    )
-    return up_market
+
+    def _atm_distance(m: dict) -> float:
+        yes_bid = float(m.get("yes_bid_dollars") or m.get("yes_bid", 0) or 0)
+        yes_ask = float(m.get("yes_ask_dollars") or m.get("yes_ask", 1) or 1)
+        mid = (yes_bid + yes_ask) / 2
+        return abs(mid - 0.5)
+
+    return min(markets, key=_atm_distance)
 
 
 # ---------------------------------------------------------------------------
@@ -105,16 +116,24 @@ def find_market(asset: str, horizon: str = "5m") -> MarketData:
     """
     series_ticker = _find_series_ticker(asset)
     event = _find_soonest_event(series_ticker)
-    event_ticker = event["ticker"]
+    event_ticker = event.get("event_ticker") or event.get("ticker")
     market = _find_up_market(event_ticker)
 
     market_ticker = market["ticker"]
-    yes_bid = int(market.get("yes_bid", 0))
-    yes_ask = int(market.get("yes_ask", 100))
-    implied_up = (yes_bid + yes_ask) / 200.0
+    # Real API: prices in "yes_bid_dollars"/"yes_ask_dollars" as 0-1 floats.
+    # Fixture/older responses may use "yes_bid"/"yes_ask" as 0-100 integers.
+    if "yes_bid_dollars" in market:
+        yes_bid = float(market.get("yes_bid_dollars") or 0)
+        yes_ask = float(market.get("yes_ask_dollars") or 1)
+        implied_up = (yes_bid + yes_ask) / 2.0
+    else:
+        yes_bid = int(market.get("yes_bid", 0))
+        yes_ask = int(market.get("yes_ask", 100))
+        implied_up = (yes_bid + yes_ask) / 200.0
     implied_down = 1.0 - implied_up
 
-    close_time = market.get("close_time") or event.get("close_time", "")
+    close_time = (market.get("close_time") or event.get("strike_date")
+                  or event.get("close_time", ""))
     window_close_ts = _iso_to_ts(close_time) if close_time else 0
 
     # Log horizon mismatch if Kalshi window ≠ requested horizon
