@@ -1,41 +1,128 @@
 # CWT Crypto Predictions Agent
 
-Backend Python agent that locates 5-minute BTC/ETH up/down prediction markets on
-Polymarket and Kalshi, pulls OHLCV via Apify, forecasts the next move with the
-Kronos K-line model, sizes a paper position with fractional Kelly, and scores
-itself after each window resolves to recalibrate. Built on the Hermes Agent
-framework with an OpenRouter free model for orchestration.
+Backend Python agent that runs a 5-stage crypto prediction pipeline every 5 minutes:
 
-See `files/MASTER_PLAN.md` (what's being built, build order) and
-`files/EXPLANATION.md` (why it's built this way) for full design rationale.
+1. **Market Agent** — finds BTC/ETH up/down markets on Polymarket (5m) and Kalshi (15m/hourly), reads implied probabilities
+2. **Data Agent** — fetches the last 1000 OHLCV bars via Apify/Binance (free tier)
+3. **Prediction Agent** — runs Kronos K-line foundation model (Monte-Carlo → P(up))
+4. **Risk Agent** — sizes a paper position with fractional Kelly criterion
+5. **Feedback Agent** — after each window resolves, scores predictions, updates Brier score, recalibrates Kelly multiplier
 
-**Status:** Phase 0 — scaffold only. Agent logic lands in later phases.
+**Scaling features:** cross-venue arbitrage detection (Polymarket vs Kalshi), cross-horizon consistency check (15m vs 3×5m), Streamlit dashboard.
 
-## Disclaimer
+Built with **Claude Code** in VS Code. Framework: **Hermes Agent** plugin + skill structure (see §Hermes below). LLM: **OpenRouter** free model.
 
-Research/education project. **Not financial advice.** Default mode is
-**paper trading only** — no real orders are placed. Prediction-market access
-is jurisdiction-restricted (Kalshi: US KYC; Polymarket: geo-restrictions); this
-project only reads public market data. Short-horizon crypto direction is close
-to a coin flip — expect P(up) near 0.5 and frequent NO-TRADE outputs.
+> **Disclaimer:** Research/education project. Paper trading only — no real orders. Not financial advice. Short-horizon crypto direction is near-random; expect P(up) ≈ 0.5 and frequent NO-TRADE outputs.
 
-## Setup
+---
+
+## Quick Start
+
+### 1. Clone and set up
 
 ```bash
+git clone https://github.com/Abhijit26918/CWT-Agents.git
+cd CWT-Agents
 python -m venv .venv
-.venv\Scripts\activate          # Windows
+
+# Windows
+.venv\Scripts\activate
+# Linux/Mac
+source .venv/bin/activate
+
 pip install -r requirements.txt
-copy .env.example .env          # then fill in APIFY_TOKEN / OPENROUTER_API_KEY
+pip install apify-client torch einops huggingface_hub==0.33.1 tqdm safetensors streamlit
 ```
 
-## Quick start
+### 2. Clone Kronos (ML model)
 
 ```bash
-python run_flow.py --dry        # prints loaded config + which secrets are set
+git clone --depth 1 https://github.com/shiyu-coder/Kronos.git vendor/Kronos
 ```
 
-## Tests
+### 3. Set up environment
 
 ```bash
-pytest
+cp .env.example .env
+# Edit .env and fill in:
+#   APIFY_TOKEN=apify_api_...        (from apify.com → Settings → Integrations → API tokens)
+#   OPENROUTER_API_KEY=sk-or-...     (from openrouter.ai → Keys, free tier)
+#   HF_HOME=D:/HuggingFace           (or any path with ~3GB free for Kronos weights)
 ```
+
+### 4. Run
+
+```bash
+# Dry run — prints config and checks secrets
+python run_flow.py --dry
+
+# One prediction cycle (downloads Kronos weights on first run ~500MB)
+python run_flow.py
+
+# Use cached Apify data (dev mode, no credit spend)
+python run_flow.py --cache
+
+# Live loop every 5 minutes
+python run_flow.py --loop --interval 300
+
+# Dashboard
+.venv\Scripts\streamlit run dashboard/app.py      # Windows
+streamlit run dashboard/app.py                    # Linux/Mac
+```
+
+### 5. Tests
+
+```bash
+pytest          # 68 tests, all offline (no API calls)
+```
+
+---
+
+## Hermes Agent Integration (Linux/macOS)
+
+The pipeline also runs as a Hermes Agent plugin with a `/crypto-flow` skill.
+
+```bash
+# Install Hermes (Linux/macOS only)
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+
+# Configure OpenRouter
+hermes model   # choose OpenRouter, paste API key
+
+# Install plugin
+cp -r hermes/plugins/crypto-predictions ~/.hermes/plugins/
+cp -r hermes/skills/crypto-prediction-flow ~/.hermes/skills/
+
+# Run
+hermes
+> /crypto-flow
+```
+
+**Windows users:** use WSL2 for Hermes. The headless `python run_flow.py` demonstrates all 5 agents on Windows.
+
+---
+
+## Project Structure
+
+```
+core/
+  markets/      polymarket.py + kalshi.py     (Agent 1)
+  data/         apify_ohlcv.py                 (Agent 2)
+  predict/      kronos_model.py                (Agent 3)
+  risk/         kelly.py                       (Agent 4)
+  feedback/     scoring.py                     (Agent 5 — feedback loop)
+  scale/        arbitrage.py                   (cross-venue + cross-horizon arb)
+  pipeline.py                                  (shared orchestration)
+hermes/
+  plugins/crypto-predictions/                  (Hermes plugin — 5 tools + post_tool_call hook)
+  skills/crypto-prediction-flow/SKILL.md       (/crypto-flow skill)
+dashboard/app.py                               (Streamlit — live predictions + scoreboard)
+run_flow.py                                    (headless entry point)
+tests/                                         (68 tests, all offline)
+```
+
+## Submission Notes
+
+- Apify token must be included in the submission email (not in this repo — see `.env.example`)
+- Paper trading only — `--live` flag is intentionally disabled in v1
+- Kronos runs CPU-only (`device: "cpu"` in `config.yaml`); switch to `Kronos-mini` for faster CPU inference
