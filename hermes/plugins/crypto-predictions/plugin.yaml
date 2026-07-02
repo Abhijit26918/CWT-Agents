@@ -1,0 +1,21 @@
+name: crypto-predictions
+version: "0.1.0"
+description: >
+  CWT crypto prediction pipeline — finds up/down markets on Polymarket and
+  Kalshi, fetches OHLCV via Apify, forecasts with Kronos, sizes paper
+  positions with Kelly, and scores past predictions to recalibrate.
+
+provides_tools:
+  - find_markets
+  - fetch_ohlcv
+  - predict_move
+  - size_position
+  - score_predictions
+
+provides_hooks:
+  - post_tool_call
+
+requires_env:
+  - APIFY_TOKEN
+
+entry_point: "__init__.py"
