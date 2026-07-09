@@ -145,7 +145,10 @@ def fetch_ohlcv(
         cached = _read_cache(symbol, interval)
         if cached:
             logger.info("Using cached OHLCV for %s %s (%d rows)", symbol, interval, len(cached))
-            return normalize_ohlcv(cached, symbol)
+            df = normalize_ohlcv(cached, symbol)
+            if conn is not None:
+                _persist(df, asset, interval, conn)
+            return df
 
     if client is None:
         import os

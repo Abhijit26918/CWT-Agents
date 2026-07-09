@@ -125,6 +125,7 @@ def run_once(
     predictor: Any | None = None,
     market_finders: dict | None = None,
     use_cache: bool = False,
+    ohlcv_fetcher: Any | None = None,
 ) -> RunReport:
     """Run one full prediction cycle for all assets × venues.
 
@@ -137,10 +138,16 @@ def run_once(
         market_finders: dict mapping venue name → callable(asset, horizon) → MarketData.
                         Defaults to the real polymarket/kalshi find_market functions.
         use_cache:      Pass True to reuse cached Apify data (dev mode).
+        ohlcv_fetcher:  Injectable OHLCV fetcher matching apify_ohlcv.fetch_ohlcv's
+                        call signature. Defaults to that real Apify-backed fetch;
+                        run_flow.py passes core.data.binance_klines.fetch_ohlcv_live
+                        by default so live cycles resolve against real bars instead
+                        of a frozen fixture.
 
     Returns:
         RunReport with one row per asset/venue prediction.
     """
+    fetch = ohlcv_fetcher or fetch_ohlcv
     if venues is None:
         venues = tuple(cfg.venues)
 
@@ -163,7 +170,7 @@ def run_once(
 
         # Agent 2: fetch OHLCV
         try:
-            ohlcv = fetch_ohlcv(
+            ohlcv = fetch(
                 asset=asset, symbol=symbol,
                 interval=cfg.ohlcv_interval, limit=cfg.ohlcv_limit,
                 actor_id=cfg.apify.actor, conn=conn,

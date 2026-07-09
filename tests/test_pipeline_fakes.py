@@ -146,6 +146,28 @@ def test_run_once_gracefully_skips_bad_venue(cfg, conn):
     assert len(report.errors) == 4   # BTC×2 + ETH×2
 
 
+def test_run_once_uses_injected_ohlcv_fetcher(cfg, conn):
+    """run_flow.py passes ohlcv_fetcher=fetch_ohlcv_live by default (live Binance
+    data instead of the frozen Apify fixture) — verify run_once actually calls
+    whatever fetcher it's given instead of always using the real Apify path."""
+    calls = []
+
+    def _fake_fetcher(asset, symbol, interval, limit, conn=None, client=None,
+                       use_cache=False, actor_id=None):
+        calls.append((asset, symbol))
+        from core.data.apify_ohlcv import normalize_ohlcv
+        return normalize_ohlcv(RAW_ROWS, symbol)
+
+    report = run_once(
+        cfg, conn,
+        predictor=FakePredictor(always_up=True),
+        market_finders=_make_market_finders(p_up=0.45),
+        ohlcv_fetcher=_fake_fetcher,
+    )
+    assert len(report.rows) == 4
+    assert {a for a, _ in calls} == {"BTC", "ETH"}
+
+
 def test_run_once_all_prediction_fields_populated(cfg, conn):
     run_once(
         cfg, conn,

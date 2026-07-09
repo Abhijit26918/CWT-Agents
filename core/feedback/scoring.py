@@ -21,6 +21,20 @@ _RECOVER_FACTOR = 1.10
 
 
 # ---------------------------------------------------------------------------
+# PnL for a resolved binary-contract bet — shared with core.backtest.engine
+# so live scoring and backtesting price outcomes identically.
+# ---------------------------------------------------------------------------
+
+def pnl_for_outcome(side: str, market_p_up: float, stake: float, won: bool) -> float:
+    """PnL for a binary contract: win → stake*(1-c)/c, lose → -stake."""
+    if side == "NONE":
+        return 0.0
+    c = market_p_up if side == "UP" else (1.0 - market_p_up)
+    c = max(c, 1e-6)
+    return stake * (1 - c) / c if won else -stake
+
+
+# ---------------------------------------------------------------------------
 # Actual direction lookup from cached OHLCV
 # ---------------------------------------------------------------------------
 
@@ -141,14 +155,7 @@ def score_predictions(conn: sqlite3.Connection, cfg) -> int:
             continue  # OHLCV data not available yet; try again next cycle
 
         won = int(side == actual)
-
-        # PnL for a binary contract: win → stake*(1-c)/c, lose → -stake
-        if side == "NONE":
-            pnl = 0.0
-        else:
-            c = market_p_up if side == "UP" else (1.0 - market_p_up)
-            c = max(c, 1e-6)
-            pnl = stake_paper * (1 - c) / c if won else -stake_paper
+        pnl = pnl_for_outcome(side, market_p_up, stake_paper, bool(won))
 
         conn.execute(
             """INSERT OR REPLACE INTO outcomes

@@ -100,6 +100,30 @@ def test_fetch_ohlcv_persists_to_db(tmp_path):
     conn.close()
 
 
+def test_fetch_ohlcv_cache_path_also_persists_to_db(tmp_path, monkeypatch):
+    """Regression: use_cache=True used to return early without persisting to
+    conn, so score_predictions could never resolve any prediction whenever the
+    pipeline ran in cache mode (which run_flow.py always does — see
+    run_flow.py:67). No OHLCV in the DB meant the live 'rolling paper'
+    calibration stayed empty forever."""
+    import core.data.apify_ohlcv as apify_ohlcv
+    from core.db import init_db
+
+    monkeypatch.setattr(
+        apify_ohlcv, "CACHE_FILE_TPL", str(tmp_path / "ohlcv_{symbol}_{interval}.json")
+    )
+    apify_ohlcv._write_cache(RAW_ROWS, "BTCUSDT", "5m")
+
+    conn = init_db(tmp_path / "test.db")
+    df = fetch_ohlcv(asset="BTC", symbol="BTCUSDT", interval="5m",
+                      conn=conn, use_cache=True)
+
+    assert len(df) == len(RAW_ROWS)
+    rows = conn.execute("SELECT COUNT(*) FROM ohlcv WHERE asset='BTC'").fetchone()[0]
+    assert rows == len(RAW_ROWS)
+    conn.close()
+
+
 def test_fetch_ohlcv_dedup_on_second_call(tmp_path):
     import sqlite3
     from core.db import init_db
