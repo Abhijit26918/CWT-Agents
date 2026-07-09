@@ -28,24 +28,30 @@ python backtest.py run --asset BTC --stride 3 --max-windows 500 --seed 42 --out 
 python backtest.py compare --asset BTC --report reports/backtest_BTC_thorough.json
 ```
 
-## Results (500 windows/asset, 60 days real history)
+## Results: sample size matters (150 vs. 500 windows)
 
-| Metric | BTC | ETH | Coin-flip baseline |
-|---|---|---|---|
-| N (traded) | 475 | 470 | — |
-| Brier score | 0.286 | 0.309 | 0.25 |
-| Hit rate | 54.7% | 49.2% | 50.0% |
+We ran this twice at different sample sizes, and the numbers moved — worth
+showing both rather than only the final one, since the shift itself is the
+useful lesson (a 150-sample read is noisy; don't over-trust it).
 
-Raw data: `reports/backtest_BTC_thorough.json`, `reports/backtest_ETH_thorough.json`
-(also `reports/backtest_BTC.json` / `backtest_ETH.json` — an earlier 150-window
-run, kept for comparison; results shifted between the two, illustrating how
-noisy a 150-sample read is vs. 500).
+| Metric | BTC (150w) | BTC (500w) | ETH (150w) | ETH (500w) | Coin-flip |
+|---|---|---|---|---|---|
+| N (traded) | 143 | 475 | 139 | 470 | — |
+| Brier score | 0.311 | 0.286 | 0.265 | 0.309 | 0.25 |
+| Hit rate | 50.3% | 54.7% | 56.8% | 49.2% | 50.0% |
 
-**Read**: BTC shows a modest, real edge. ETH is currently indistinguishable
-from chance. Neither is a dramatic result — and that's expected. Crypto
-markets are close to efficient at 5-minute horizons; a large apparent edge on
-a 60-day sample would be more likely to indicate overfitting or a data leak
-than genuine alpha.
+Raw data: `reports/backtest_BTC.json` / `backtest_ETH.json` (150-window run),
+`reports/backtest_BTC_thorough.json` / `backtest_ETH_thorough.json` (500-window run).
+
+**Read**: at 150 windows, ETH looked like it had a clear edge (56.8%) and BTC
+looked like pure noise (50.3%) — the larger 500-window run flipped that
+impression almost entirely (BTC 54.7%, ETH 49.2%). Neither run shows a
+dramatic edge, and that's expected: crypto markets are close to efficient at
+5-minute horizons, and a large apparent edge on a 60-day sample would be more
+likely to indicate overfitting or a data leak than genuine alpha. The
+takeaway isn't "BTC is good, ETH is bad" — it's that 150 samples isn't enough
+to conclude either way, and even 500 should be treated as a first read, not
+a final verdict.
 
 ## A real bug the live loop caught (and the backtest didn't)
 
