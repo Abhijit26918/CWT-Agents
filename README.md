@@ -73,8 +73,19 @@ streamlit run dashboard/app.py                    # Linux/Mac
 ### 5. Tests
 
 ```bash
-pytest          # 68 tests, all offline (no API calls)
+pytest          # 85 tests, all offline (no API calls)
 ```
+
+### 6. Backtest
+
+```bash
+python backtest.py fetch --asset BTC --days 60
+python backtest.py run --asset BTC --stride 3 --max-windows 500 --seed 42 --out reports/backtest_BTC_thorough.json
+python backtest.py compare --asset BTC --report reports/backtest_BTC_thorough.json
+```
+
+See [BACKTEST_RESULTS.md](BACKTEST_RESULTS.md) for methodology, results, and a
+real bug the live loop caught that the backtest didn't.
 
 ---
 
@@ -112,13 +123,17 @@ core/
   risk/         kelly.py                       (Agent 4)
   feedback/     scoring.py                     (Agent 5 — feedback loop)
   scale/        arbitrage.py                   (cross-venue + cross-horizon arb)
+  backtest/     engine.py                      (walk-forward historical backtest)
+  data/         binance_klines.py               (direct Binance historical fetch, backtest + live)
   pipeline.py                                  (shared orchestration)
 hermes/
   plugins/crypto-predictions/                  (Hermes plugin — 5 tools + post_tool_call hook)
   skills/crypto-prediction-flow/SKILL.md       (/crypto-flow skill)
 dashboard/app.py                               (Streamlit — live predictions + scoreboard)
 run_flow.py                                    (headless entry point)
-tests/                                         (68 tests, all offline)
+backtest.py                                    (backtest CLI — fetch / run / compare)
+reports/                                       (backtest result JSON — see BACKTEST_RESULTS.md)
+tests/                                         (85 tests, all offline)
 ```
 
 ## Submission Notes
