@@ -33,11 +33,12 @@ class FakePredictor:
                 T=1.0, top_k=0, top_p=0.9, sample_count=1, verbose=False):
         last_close = float(df["close"].iloc[-1])
         predicted = last_close * (1.01 if self.always_up else 0.99)
+        n = len(y_timestamp)
         return pd.DataFrame(
             {
-                "open": [predicted], "high": [predicted],
-                "low": [predicted], "close": [predicted],
-                "volume": [0.0], "amount": [0.0],
+                "open": [predicted] * n, "high": [predicted] * n,
+                "low": [predicted] * n, "close": [predicted] * n,
+                "volume": [0.0] * n, "amount": [0.0] * n,
             },
             index=y_timestamp,
         )
@@ -77,6 +78,55 @@ def test_predict_move_uses_lookback_slice(ohlcv_df, cfg):
     short_df = ohlcv_df.head(5)
     p_up = predict_move(short_df, cfg, predictor=FakePredictor(always_up=True))
     assert isinstance(p_up, float)
+
+
+# ---------------------------------------------------------------------------
+# pred_len (multi-step-ahead forecasting — used by the delayed-confirmation flow)
+# ---------------------------------------------------------------------------
+
+class _RecordingPredictor:
+    """Records the y_timestamp it was called with, and returns a predicted
+    close that only goes UP on the LAST step (down on every earlier step) —
+    disambiguates "uses the last forecast step" from "uses the first"."""
+    def __init__(self):
+        self.last_call_y_timestamp = None
+
+    def predict(self, df, x_timestamp, y_timestamp, pred_len=1,
+                T=1.0, top_k=0, top_p=0.9, sample_count=1, verbose=False):
+        self.last_call_y_timestamp = y_timestamp
+        last_close = float(df["close"].iloc[-1])
+        n = len(y_timestamp)
+        closes = [last_close * 0.99] * (n - 1) + [last_close * 1.01]  # down,...,down,UP
+        return pd.DataFrame(
+            {"open": closes, "high": closes, "low": closes, "close": closes,
+             "volume": [0.0] * n, "amount": [0.0] * n},
+            index=y_timestamp,
+        )
+
+
+def test_predict_move_pred_len_builds_n_future_timestamps(ohlcv_df, cfg):
+    recorder = _RecordingPredictor()
+    predict_move(ohlcv_df, cfg, predictor=recorder, pred_len=5)
+
+    assert len(recorder.last_call_y_timestamp) == 5
+    steps = recorder.last_call_y_timestamp.diff().dropna().unique()
+    assert len(steps) == 1  # evenly spaced by the interval
+
+    interval_secs = 300  # config's 5m
+    assert steps[0].total_seconds() == interval_secs
+
+
+def test_predict_move_uses_last_step_not_first(ohlcv_df, cfg):
+    """With pred_len=5, the up/down decision must use the 5th (last) forecast
+    step's close, not the 1st — otherwise pred_len wouldn't mean anything."""
+    p_up = predict_move(ohlcv_df, cfg, predictor=_RecordingPredictor(), pred_len=5)
+    assert p_up == pytest.approx(1.0)  # last step is always UP by construction
+
+
+def test_predict_move_default_pred_len_is_one(ohlcv_df, cfg):
+    recorder = _RecordingPredictor()
+    predict_move(ohlcv_df, cfg, predictor=recorder)
+    assert len(recorder.last_call_y_timestamp) == 1
 
 
 # ---------------------------------------------------------------------------

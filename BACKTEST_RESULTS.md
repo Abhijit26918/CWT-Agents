@@ -79,6 +79,49 @@ The contaminated pre-fix live predictions were backed up (not committed —
 local `cwt_pre_fix_backup.db`) and the live `predictions`/`outcomes`/`calibration`
 tables were reset before restarting the loop.
 
+## Delayed confirmation: does a 1m:n+5 re-check improve the 5m:n+1 signal?
+
+A reviewer question prompted this: instead of placing a bet the instant the 5m
+model forms an edge, park it as a candidate and re-check ~2 minutes later with
+a faster model before actually placing it — does that improve quality?
+
+**Getting the comparison right mattered.** The first implementation compared
+the 5-minute prediction against a 1-minute model forecasting only its *next*
+bar (`1m:n+1`) — a much shorter, noisier horizon than the original ~5-minute
+target. That mismatch is likely why it first looked like confirmation didn't
+help (flat on BTC, actively hurt ETH). Fixed by adding `pred_len` support to
+`predict_move()` (Kronos natively supports multi-step autoregressive
+forecasting) so the confirmation model genuinely forecasts the *same* forward
+horizon (`1m:n+5` ≈ the same ~5-minute-ahead target), not a different one.
+
+Both the live pipeline (`core/pipeline.py::confirm_candidates`) and the
+backtest (`core/backtest/engine.py::run_backtest(confirm_df=...)`) implement
+this the same way — a candidate is parked as `PENDING_CONFIRM`, then promoted
+to `OPEN` or dropped as `REJECTED` based on whether the confirm-interval
+model still agrees on direction.
+
+**Results (40 windows/asset, real Kronos, `confirm_delay_seconds=120`, `confirm_pred_len=5`):**
+
+| Metric | BTC baseline | BTC confirmed | ETH baseline | ETH confirmed |
+|---|---|---|---|---|
+| N | 40 | 19 | 37 | 26 |
+| Hit rate | 52.5% | **63.2%** | 56.8% | 57.7% |
+| Brier score | 0.267 | **0.217** | 0.314 | 0.299 |
+| Synthetic PnL | $433 | $633 | $233 | $333 |
+
+Raw data: `reports/backtest_BTC_confirm.json`, `reports/backtest_ETH_confirm.json`.
+
+**Read**: directionally positive on both assets once implemented correctly —
+meaningful on BTC, modest on ETH. Sample size is still small (19–26 confirmed
+trades/asset), so this is an encouraging first read, not a proven result.
+Reproduce with:
+```bash
+python backtest.py fetch --asset BTC --days 60 --interval 1m
+python backtest.py run --asset BTC --stride 12 --max-windows 40 --seed 42 \
+    --confirm --out reports/backtest_BTC_confirm.json
+```
+Live: `python run_flow.py --demo --confirm --loop` (defaults to `--confirm-pred-len 5`).
+
 ## Known limitations / next steps
 
 - `market_p_up` is synthetic (see Methodology) — PnL/Kelly numbers are not a

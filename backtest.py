@@ -9,14 +9,23 @@ Usage:
 
     python backtest.py compare --asset BTC --report reports/backtest_BTC.json
 
-`fetch` pulls historical 5m OHLCV directly from Binance's public REST API
+    # Delayed-confirmation backtest (mirrors run_flow.py --confirm):
+    python backtest.py fetch --asset BTC --days 60 --interval 1m
+    python backtest.py run --asset BTC --stride 12 --max-windows 500 --seed 42 \\
+        --confirm --out reports/backtest_BTC_confirm.json
+
+`fetch` pulls historical OHLCV directly from Binance's public REST API
 (no key needed — Apify's actor has no pagination, see core/data/binance_klines.py)
 into a dedicated backtest.db, kept separate from the live cwt.db so a backtest
-run can never perturb the live rolling-paper calibration.
+run can never perturb the live rolling-paper calibration. Defaults to the
+config's 5m interval; pass --interval 1m to also fetch the finer-grained data
+needed for --confirm.
 
 `run` replays predict_move + size_position over the fetched history and writes
 a JSON report (Brier score, hit rate, synthetic PnL — see core/backtest/engine.py
-docstring for why PnL is labeled synthetic).
+docstring for why PnL is labeled synthetic). --confirm additionally replays the
+delayed-confirmation flow (needs 1m history already fetched) and reports both
+the "trade every candidate" baseline and the confirmed-only view side by side.
 
 `compare` prints the backtest report next to the live cwt.db `calibration` +
 `outcomes` numbers for the same asset, side by side.
@@ -40,13 +49,14 @@ BACKTEST_DB = "backtest.db"
 def cmd_fetch(args: argparse.Namespace) -> None:
     cfg = load_config()
     symbol = cfg.symbols[args.asset]
+    interval = args.interval or cfg.ohlcv_interval
     conn = init_db(BACKTEST_DB)
     df = fetch_and_store_history(
-        asset=args.asset, symbol=symbol, interval=cfg.ohlcv_interval,
+        asset=args.asset, symbol=symbol, interval=interval,
         days=args.days, conn=conn,
     )
     conn.close()
-    print(f"Fetched {len(df)} historical {cfg.ohlcv_interval} bars for {args.asset} "
+    print(f"Fetched {len(df)} historical {interval} bars for {args.asset} "
           f"({args.days} days) -> {BACKTEST_DB}")
 
 
@@ -72,10 +82,23 @@ def cmd_run(args: argparse.Namespace) -> None:
             f"Run `python backtest.py fetch --asset {args.asset}` first."
         )
 
+    confirm_df = None
+    if args.confirm:
+        confirm_df = _load_history(args.asset, args.confirm_interval)
+        if confirm_df.empty:
+            raise SystemExit(
+                f"--confirm needs {args.confirm_interval} history for {args.asset} in "
+                f"{BACKTEST_DB}. Run `python backtest.py fetch --asset {args.asset} "
+                f"--interval {args.confirm_interval}` first."
+            )
+
     result = run_backtest(
         df, cfg, args.asset,
         market_p_up=args.market_p_up, stride=args.stride,
         max_windows=args.max_windows, seed=args.seed,
+        confirm_df=confirm_df, confirm_interval=args.confirm_interval,
+        confirm_delay_seconds=args.confirm_delay_seconds,
+        confirm_pred_len=args.confirm_pred_len,
     )
     s = result.summary
     print(f"\n=== Backtest: {args.asset} ({s.n_windows} windows, "
@@ -87,6 +110,15 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"Synthetic PnL total:    ${s.total_pnl_synthetic}  "
           f"(market_p_up={args.market_p_up} fixed — not real market odds)")
     print(f"Synthetic max drawdown: ${s.max_drawdown_synthetic}")
+
+    if s.n_confirmed is not None:
+        print(f"\n--- With {args.confirm_delay_seconds}s delayed {args.confirm_interval}:n+"
+              f"{args.confirm_pred_len} confirmation ---")
+        print(f"Confirmed: {s.n_confirmed}   Rejected: {s.n_rejected_by_confirmation}")
+        print(f"Brier (confirmed only):    {s.brier_confirmed}")
+        print(f"Hit rate (confirmed only): {s.hit_rate_confirmed}")
+        print(f"Synthetic PnL (confirmed): ${s.total_pnl_confirmed_synthetic}")
+        print(f"Synthetic max drawdown:    ${s.max_drawdown_confirmed_synthetic}")
 
     if args.out:
         out_path = Path(args.out)
@@ -122,6 +154,15 @@ def cmd_compare(args: argparse.Namespace) -> None:
         print(f"\nNote: live sample (N={resolved}) is too small to draw firm "
               f"conclusions from — that's the whole reason the backtest exists.")
 
+    if s.get("n_confirmed") is not None:
+        print(f"\n--- Backtest: with vs. without delayed confirmation ---")
+        print(f"{'Metric':<22}{'No confirm':<16}{'Confirmed only'}")
+        print("-" * 60)
+        print(f"{'N':<22}{s['n_traded']:<16}{s['n_confirmed']}")
+        print(f"{'Brier score':<22}{s['brier_traded']:<16}{s['brier_confirmed']}")
+        print(f"{'Hit rate':<22}{s['hit_rate_traded']:<16}{s['hit_rate_confirmed']}")
+        print(f"{'Synthetic PnL':<22}{s['total_pnl_synthetic']:<16}{s['total_pnl_confirmed_synthetic']}")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CWT historical backtest — see module docstring")
@@ -130,6 +171,9 @@ def main() -> None:
     p_fetch = sub.add_parser("fetch", help="Download historical OHLCV from Binance directly")
     p_fetch.add_argument("--asset", required=True, choices=["BTC", "ETH"])
     p_fetch.add_argument("--days", type=int, default=60)
+    p_fetch.add_argument("--interval", default=None,
+                          help="Bar interval (default: config's 5m). Pass 1m to also "
+                               "fetch what --confirm needs.")
     p_fetch.set_defaults(func=cmd_fetch)
 
     p_run = sub.add_parser("run", help="Replay the pipeline's prediction+sizing logic over history")
@@ -142,6 +186,15 @@ def main() -> None:
                         help="Fixed synthetic market-implied P(up) — no historical odds archive exists")
     p_run.add_argument("--seed", type=int, default=None)
     p_run.add_argument("--out", default=None, help="Path to write the full JSON report")
+    p_run.add_argument("--confirm", action="store_true",
+                        help="Also replay the delayed-confirmation flow (needs "
+                             "--confirm-interval history already fetched)")
+    p_run.add_argument("--confirm-interval", default="1m")
+    p_run.add_argument("--confirm-delay-seconds", type=int, default=120)
+    p_run.add_argument("--confirm-pred-len", type=int, default=5,
+                        help="Steps ahead (in confirm-interval units) the "
+                             "confirmation model forecasts — should match the "
+                             "candidate's own horizon (default 5 = same ~5min-ahead target)")
     p_run.set_defaults(func=cmd_run)
 
     p_cmp = sub.add_parser("compare", help="Compare a backtest report against live cwt.db")

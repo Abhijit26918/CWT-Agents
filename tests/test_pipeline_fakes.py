@@ -40,9 +40,10 @@ class FakePredictor:
                 T=1.0, top_k=0, top_p=0.9, sample_count=1, verbose=False):
         last_close = float(df["close"].iloc[-1])
         predicted = last_close * (1.01 if self.always_up else 0.99)
+        n = len(y_timestamp)
         return pd.DataFrame(
-            {"open": [predicted], "high": [predicted], "low": [predicted],
-             "close": [predicted], "volume": [0.0], "amount": [0.0]},
+            {"open": [predicted] * n, "high": [predicted] * n, "low": [predicted] * n,
+             "close": [predicted] * n, "volume": [0.0] * n, "amount": [0.0] * n},
             index=y_timestamp,
         )
 

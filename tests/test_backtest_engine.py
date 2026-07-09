@@ -20,9 +20,10 @@ class FakePredictor:
                 T=1.0, top_k=0, top_p=0.9, sample_count=1, verbose=False):
         last_close = float(df["close"].iloc[-1])
         predicted = last_close * (1.01 if self.always_up else 0.99)
+        n = len(y_timestamp)
         return pd.DataFrame(
-            {"open": [predicted], "high": [predicted], "low": [predicted],
-             "close": [predicted], "volume": [0.0], "amount": [0.0]},
+            {"open": [predicted] * n, "high": [predicted] * n, "low": [predicted] * n,
+             "close": [predicted] * n, "volume": [0.0] * n, "amount": [0.0] * n},
             index=y_timestamp,
         )
 
@@ -129,3 +130,85 @@ def test_run_backtest_raises_on_insufficient_history(small_cfg):
     df = _synthetic_df(n_context=5, n_up=0, n_down=0)  # only 5 bars, lookback=5 needs 7+
     with pytest.raises(ValueError):
         run_backtest(df, small_cfg, "BTC", predictor=FakePredictor())
+
+
+# ---------------------------------------------------------------------------
+# Delayed confirmation (confirm_df) — mirrors the live --confirm flow
+# ---------------------------------------------------------------------------
+
+def _synthetic_1m_df(start_time: int, end_time: int) -> pd.DataFrame:
+    """Flat 1m bars — content doesn't matter for FakePredictor, only that
+    enough lookback history exists at each confirmation checkpoint."""
+    rows = []
+    t = start_time
+    while t <= end_time:
+        rows.append({"open_time": t, "open": 100.0, "high": 100.0, "low": 100.0,
+                      "close": 100.0, "volume": 1.0, "amount": 100.0})
+        t += 60
+    return pd.DataFrame(rows)
+
+
+def test_run_backtest_confirmation_all_agree(small_cfg):
+    df = _synthetic_df(n_context=5, n_up=15, n_down=10)
+    confirm_df = _synthetic_1m_df(1_700_000_000 - 600, 1_700_000_000 + 9600)
+
+    result = run_backtest(
+        df, small_cfg, "BTC",
+        predictor=FakePredictor(always_up=True),
+        confirm_df=confirm_df,
+        confirm_predictor=FakePredictor(always_up=True),  # 1m model always agrees
+        market_p_up=0.50, stride=1, max_windows=None,
+    )
+    s = result.summary
+
+    assert all(t.confirmed is True for t in result.trades if t.side != "NONE")
+    assert s.n_confirmed == s.n_traded
+    assert s.n_rejected_by_confirmation == 0
+    # Nothing was rejected, so the confirmed-only view matches the baseline exactly.
+    assert s.brier_confirmed == pytest.approx(s.brier_traded)
+    assert s.hit_rate_confirmed == pytest.approx(s.hit_rate_traded)
+    assert s.total_pnl_confirmed_synthetic == pytest.approx(s.total_pnl_synthetic)
+
+
+def test_run_backtest_confirmation_all_disagree(small_cfg):
+    df = _synthetic_df(n_context=5, n_up=15, n_down=10)
+    confirm_df = _synthetic_1m_df(1_700_000_000 - 600, 1_700_000_000 + 9600)
+
+    result = run_backtest(
+        df, small_cfg, "BTC",
+        predictor=FakePredictor(always_up=True),      # 5m candidate always UP
+        confirm_df=confirm_df,
+        confirm_predictor=FakePredictor(always_up=False),  # 1m always disagrees
+        market_p_up=0.50, stride=1, max_windows=None,
+    )
+    s = result.summary
+
+    assert all(t.confirmed is False for t in result.trades if t.side != "NONE")
+    assert s.n_confirmed == 0
+    assert s.n_rejected_by_confirmation == s.n_traded
+    # No confirmed trades → nothing to average, but PnL/drawdown are a clean zero.
+    assert s.brier_confirmed is None
+    assert s.total_pnl_confirmed_synthetic == 0.0
+    # Baseline (as if confirmation didn't exist) is untouched by any of this.
+    assert s.n_traded == 25
+    assert s.total_pnl_synthetic == pytest.approx(500.0)
+
+
+def test_run_backtest_confirmation_skipped_when_insufficient_1m_history(small_cfg):
+    df = _synthetic_df(n_context=5, n_up=15, n_down=10)
+    confirm_df = _synthetic_1m_df(1_700_000_000, 1_700_000_000 + 120)  # far too short
+
+    result = run_backtest(
+        df, small_cfg, "BTC",
+        predictor=FakePredictor(always_up=True),
+        confirm_df=confirm_df,
+        confirm_predictor=FakePredictor(always_up=True),
+        market_p_up=0.50, stride=1, max_windows=None,
+    )
+    s = result.summary
+
+    assert all(t.confirmed is None for t in result.trades)
+    assert s.n_confirmed is None
+    assert s.n_rejected_by_confirmation is None
+    # Confirmation was requested but never evaluable — baseline still reported.
+    assert s.n_traded == 25

@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS predictions (
   ts INTEGER, asset TEXT, venue TEXT, horizon TEXT,
   model_p_up REAL, market_p_up REAL, edge REAL,
   side TEXT, kelly_fraction REAL, stake_paper REAL,
-  window_close_ts INTEGER, status TEXT DEFAULT 'OPEN', created_at TEXT
+  window_close_ts INTEGER, status TEXT DEFAULT 'OPEN', created_at TEXT,
+  confirm_at_ts INTEGER, model_p_up_1m REAL
 );
 CREATE TABLE IF NOT EXISTS outcomes (
   prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id),
@@ -39,8 +40,20 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotently add columns introduced after the original CREATE TABLE
+    (CREATE TABLE IF NOT EXISTS doesn't alter already-existing tables)."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(predictions)")}
+    if "confirm_at_ts" not in cols:
+        conn.execute("ALTER TABLE predictions ADD COLUMN confirm_at_ts INTEGER")
+    if "model_p_up_1m" not in cols:
+        conn.execute("ALTER TABLE predictions ADD COLUMN model_p_up_1m REAL")
+    conn.commit()
+
+
 def init_db(path: str | Path = "cwt.db") -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.executescript(SCHEMA)
     conn.commit()
+    _migrate(conn)
     return conn

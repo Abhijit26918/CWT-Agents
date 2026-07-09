@@ -6,6 +6,7 @@ Usage:
     python run_flow.py --cache                  # dev/offline: frozen Apify fixture, no network
     python run_flow.py --demo                   # demo mode: simulated market odds
     python run_flow.py --loop --interval 300    # run every 5 minutes
+    python run_flow.py --demo --confirm --loop  # delayed-confirmation mode (see below)
 
 --demo is useful when Polymarket/Kalshi are geo-blocked (US-restricted APIs).
 Kronos runs for real on live OHLCV; market probabilities are simulated to
@@ -17,6 +18,17 @@ By default (no --cache), OHLCV comes from core.data.binance_klines.fetch_ohlcv_l
 real closing bars — this is what lets score_predictions actually accumulate live
 calibration data over --loop runs. --cache switches back to the old frozen-fixture
 path for fully offline dev (no network at all).
+
+--confirm switches to a delayed-confirmation flow: a 5m candidate with an edge
+is parked as PENDING_CONFIRM instead of placed immediately, then ~2 minutes
+later re-checked against a 1m model before actually being placed (or dropped).
+The confirmation model forecasts confirm-pred-len 1m steps ahead (default 5,
+i.e. the same ~5-minute-ahead horizon the original 5m candidate predicted) —
+NOT just the next 1-minute bar, which would be a different, much noisier
+horizon and not a real confirmation of the same forecast. Only makes sense
+with --loop, and needs a faster cadence than the 5-minute horizon window to
+catch the confirmation in time — --interval defaults to 60s automatically
+when --confirm is set (pass --interval explicitly to override).
 """
 from __future__ import annotations
 
@@ -43,9 +55,18 @@ def main() -> None:
                         help="Use simulated market data (for geo-blocked regions)")
     parser.add_argument("--loop", action="store_true",
                         help="Run continuously on --interval seconds")
-    parser.add_argument("--interval", type=int, default=300,
-                        help="Seconds between loop iterations (default: 300)")
+    parser.add_argument("--interval", type=int, default=None,
+                        help="Seconds between loop iterations "
+                             "(default: 300, or 60 if --confirm is set)")
+    parser.add_argument("--confirm", action="store_true",
+                        help="Delayed-confirmation flow: park a candidate, "
+                             "re-check with a 1m model ~2min later before placing it")
+    parser.add_argument("--confirm-pred-len", type=int, default=5,
+                        help="Steps ahead (in 1m units) the confirmation model "
+                             "forecasts — should match the candidate's own horizon "
+                             "(default 5 = same ~5min-ahead target)")
     args = parser.parse_args()
+    interval = args.interval if args.interval is not None else (60 if args.confirm else 300)
 
     run_id = setup_logging()
     cfg = load_config()
@@ -76,16 +97,22 @@ def main() -> None:
             use_cache=args.cache,
             market_finders=demo_finders,
             ohlcv_fetcher=None if args.cache else fetch_ohlcv_live,
+            confirm=args.confirm,
+            confirm_pred_len=args.confirm_pred_len,
         )
         print()
         report.print_table()
         print()
 
+    if args.confirm and not args.loop:
+        print("[ Note: --confirm without --loop only creates candidates — "
+              "nothing will be there yet to confirm them ~2min later. ]\n")
+
     if args.loop:
-        print(f"Starting loop — running every {args.interval}s. Ctrl+C to stop.")
+        print(f"Starting loop — running every {interval}s. Ctrl+C to stop.")
         while True:
             _cycle()
-            time.sleep(args.interval)
+            time.sleep(interval)
     else:
         _cycle()
 

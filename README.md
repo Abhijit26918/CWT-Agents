@@ -65,6 +65,10 @@ python run_flow.py --cache
 # Live loop every 5 minutes
 python run_flow.py --loop --interval 300
 
+# Delayed-confirmation flow: park a candidate, re-check with a 1m:n+5 model
+# ~2min later before actually placing it (see BACKTEST_RESULTS.md)
+python run_flow.py --demo --confirm --loop
+
 # Dashboard
 .venv\Scripts\streamlit run dashboard/app.py      # Windows
 streamlit run dashboard/app.py                    # Linux/Mac
@@ -73,7 +77,7 @@ streamlit run dashboard/app.py                    # Linux/Mac
 ### 5. Tests
 
 ```bash
-pytest          # 85 tests, all offline (no API calls)
+pytest          # 98 tests, all offline (no API calls)
 ```
 
 ### 6. Backtest
@@ -133,7 +137,7 @@ dashboard/app.py                               (Streamlit — live predictions +
 run_flow.py                                    (headless entry point)
 backtest.py                                    (backtest CLI — fetch / run / compare)
 reports/                                       (backtest result JSON — see BACKTEST_RESULTS.md)
-tests/                                         (85 tests, all offline)
+tests/                                         (98 tests, all offline)
 ```
 
 ## Submission Notes

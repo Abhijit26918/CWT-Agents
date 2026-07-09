@@ -30,6 +30,8 @@ from core.risk.kelly import size_position
 
 logger = logging.getLogger(__name__)
 
+_INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
+
 
 @dataclass
 class BacktestTrade:
@@ -37,11 +39,14 @@ class BacktestTrade:
     resolved_open_time: int    # open_time of the bar whose outcome we checked
     model_p_up: float
     market_p_up: float
-    side: str                  # UP | DOWN | NONE
-    stake_paper: float
+    side: str                  # UP | DOWN | NONE (candidate side, before confirmation)
+    stake_paper: float         # 0 if side==NONE or the candidate was rejected by confirmation
     actual_direction: str      # UP | DOWN
     won: bool
-    pnl_paper: float
+    pnl_paper: float           # 0 if side==NONE or rejected — no capital was committed
+    # Only set when run_backtest(confirm_df=...) is used:
+    confirmed: bool | None = None       # None = confirmation not evaluated for this trade
+    model_p_up_1m: float | None = None
 
 
 @dataclass
@@ -69,6 +74,17 @@ class BacktestSummary:
     pnl_std_synthetic: float | None
     sharpe_like_synthetic: float | None  # per-trade, NOT annualized
     max_drawdown_synthetic: float
+    # Only populated when run_backtest(confirm_df=...) is used — lets you
+    # compare "place every candidate" (fields above) vs. "only place
+    # candidates a faster confirm_interval model still agrees with 2min
+    # later" (fields below), the same question the live --confirm flow answers.
+    n_confirmed: int | None = None
+    n_rejected_by_confirmation: int | None = None
+    brier_confirmed: float | None = None
+    hit_rate_confirmed: float | None = None
+    total_pnl_confirmed_synthetic: float | None = None
+    mean_pnl_per_trade_confirmed_synthetic: float | None = None
+    max_drawdown_confirmed_synthetic: float | None = None
 
 
 @dataclass
@@ -102,6 +118,14 @@ def _seed_rngs(seed: int) -> None:
         pass
 
 
+def _last_closed_bar_index(open_times: np.ndarray, at_ts: int, interval_seconds: int) -> int | None:
+    """Index of the last bar in *open_times* (sorted ascending) that has fully
+    closed by at_ts (open_time + interval_seconds <= at_ts). None if none has."""
+    cutoff = at_ts - interval_seconds
+    idx = int(np.searchsorted(open_times, cutoff, side="right")) - 1
+    return idx if idx >= 0 else None
+
+
 def run_backtest(
     df: pd.DataFrame,
     cfg: AppConfig,
@@ -111,6 +135,11 @@ def run_backtest(
     stride: int = 1,
     max_windows: int | None = 500,
     seed: int | None = None,
+    confirm_df: pd.DataFrame | None = None,
+    confirm_interval: str = "1m",
+    confirm_delay_seconds: int = 120,
+    confirm_pred_len: int = 5,
+    confirm_predictor: Any | None = None,
 ) -> BacktestResult:
     """Replay predict_move + size_position over historical bars in *df*.
 
@@ -126,6 +155,26 @@ def run_backtest(
         max_windows:  Hard cap on windows evaluated, evenly subsampled across
                       the whole history if stride alone leaves too many. None = no cap.
         seed:         Best-effort RNG seed for reproducibility across runs.
+        confirm_df:   Optional finer-grained historical OHLCV (e.g. 1m bars,
+                      chronologically sorted, same columns as df) mirroring the
+                      live --confirm flow: a candidate with an edge is only
+                      counted as a real trade if a model run on confirm_df
+                      confirm_delay_seconds after the candidate's target window
+                      opened still agrees on direction. Windows too close to
+                      the start of confirm_df's history (not enough lookback
+                      yet) are left unconfirmed (BacktestTrade.confirmed=None).
+        confirm_interval:      Bar interval of confirm_df (e.g. "1m").
+        confirm_delay_seconds: How long after the candidate to check confirmation.
+        confirm_pred_len:      Steps ahead (in confirm_interval units) the
+                               confirmation model forecasts — should match the
+                               candidate's own forward horizon (default 5 × 1m ≈
+                               the same ~5-minute-ahead target the 5m candidate
+                               predicted). Using pred_len=1 here would compare a
+                               ~5-minute-ahead forecast against a 1-minute-ahead
+                               one — two different horizons, not a confirmation
+                               of the same forecast with fresher data.
+        confirm_predictor:     Injectable predictor for the confirmation model
+                               (defaults to the same `predictor`).
     """
     lookback = cfg.kronos.lookback
     n = len(df)
@@ -140,9 +189,14 @@ def run_backtest(
 
     indices = _select_indices(lookback, n, stride, max_windows)
     logger.info(
-        "Backtesting %s: %d windows (of %d bars, lookback=%d, stride=%d)",
+        "Backtesting %s: %d windows (of %d bars, lookback=%d, stride=%d)%s",
         asset, len(indices), n, lookback, stride,
+        " [with delayed confirmation]" if confirm_df is not None else "",
     )
+
+    confirm_open_times = confirm_df["open_time"].to_numpy() if confirm_df is not None else None
+    confirm_interval_secs = _INTERVAL_SECONDS.get(confirm_interval, 60)
+    confirm_predictor = confirm_predictor if confirm_predictor is not None else predictor
 
     trades: list[BacktestTrade] = []
     for i in indices:
@@ -151,6 +205,7 @@ def run_backtest(
 
         next_bar = df.iloc[i + 1]
         actual_direction = "UP" if next_bar["close"] > next_bar["open"] else "DOWN"
+        target_open_time = int(window["open_time"].iloc[-1])  # == next_bar's open_time
 
         decision = size_position(
             p_up=p_up,
@@ -161,11 +216,34 @@ def run_backtest(
             fee=cfg.risk.fee,
             bankroll=cfg.risk.bankroll_paper,
         )
+
+        # won/pnl always reflect the "trade every candidate" baseline (as if
+        # confirmation didn't exist) — this keeps brier_traded/total_pnl_synthetic
+        # etc. an uncontaminated baseline. The confirmed-only view in
+        # _summarize filters by `confirmed` and reuses these same won/pnl
+        # values for trades that were actually confirmed (identical economics
+        # to the baseline for those); rejected trades simply don't contribute
+        # to that view rather than being zeroed out here.
         won = decision.side == actual_direction
         pnl = pnl_for_outcome(decision.side, market_p_up, decision.stake_paper, won)
 
+        confirmed = None
+        model_p_up_1m = None
+
+        if confirm_df is not None and decision.side != "NONE":
+            confirm_at_ts = target_open_time + confirm_delay_seconds
+            j = _last_closed_bar_index(confirm_open_times, confirm_at_ts, confirm_interval_secs)
+            if j is not None and j + 1 >= lookback:
+                confirm_window = confirm_df.iloc[j - lookback + 1: j + 1]
+                model_p_up_1m = predict_move(
+                    confirm_window, cfg, predictor=confirm_predictor,
+                    interval_override=confirm_interval, pred_len=confirm_pred_len,
+                )
+                one_min_dir = "UP" if model_p_up_1m >= 0.5 else "DOWN"
+                confirmed = one_min_dir == decision.side
+
         trades.append(BacktestTrade(
-            window_open_time=int(window["open_time"].iloc[-1]),
+            window_open_time=target_open_time,
             resolved_open_time=int(next_bar["open_time"]),
             model_p_up=round(p_up, 6),
             market_p_up=market_p_up,
@@ -174,6 +252,8 @@ def run_backtest(
             actual_direction=actual_direction,
             won=won,
             pnl_paper=round(pnl, 4),
+            confirmed=confirmed,
+            model_p_up_1m=round(model_p_up_1m, 6) if model_p_up_1m is not None else None,
         ))
 
     summary = _summarize(asset, trades)
@@ -215,6 +295,32 @@ def _summarize(asset: str, trades: list[BacktestTrade]) -> BacktestSummary:
         running_max = np.maximum.accumulate(cum)
         max_dd = float((running_max - cum).max())
 
+    # Confirmed-only view (only meaningful if run_backtest(confirm_df=...) was used)
+    confirmed_trades = [t for t in traded if t.confirmed is True]
+    rejected_trades = [t for t in traded if t.confirmed is False]
+    n_confirmed = n_rejected = None
+    brier_confirmed = hit_rate_confirmed = None
+    total_pnl_confirmed = mean_pnl_confirmed = max_dd_confirmed = None
+
+    if any(t.confirmed is not None for t in traded):
+        n_confirmed = len(confirmed_trades)
+        n_rejected = len(rejected_trades)
+        if confirmed_trades:
+            brier_confirmed = sum(
+                (t.model_p_up - (1.0 if t.actual_direction == "UP" else 0.0)) ** 2
+                for t in confirmed_trades
+            ) / n_confirmed
+            hit_rate_confirmed = sum(1 for t in confirmed_trades if t.won) / n_confirmed
+
+            pnls_c = np.array([t.pnl_paper for t in confirmed_trades])
+            total_pnl_confirmed = float(pnls_c.sum())
+            mean_pnl_confirmed = float(pnls_c.mean())
+            cum_c = np.cumsum(pnls_c)
+            max_dd_confirmed = float((np.maximum.accumulate(cum_c) - cum_c).max())
+        else:
+            total_pnl_confirmed = 0.0
+            max_dd_confirmed = 0.0
+
     return BacktestSummary(
         asset=asset,
         n_windows=n_windows,
@@ -231,4 +337,11 @@ def _summarize(asset: str, trades: list[BacktestTrade]) -> BacktestSummary:
         pnl_std_synthetic=round(pnl_std, 4) if pnl_std is not None else None,
         sharpe_like_synthetic=round(sharpe, 4) if sharpe is not None else None,
         max_drawdown_synthetic=round(max_dd, 2),
+        n_confirmed=n_confirmed,
+        n_rejected_by_confirmation=n_rejected,
+        brier_confirmed=round(brier_confirmed, 6) if brier_confirmed is not None else None,
+        hit_rate_confirmed=round(hit_rate_confirmed, 4) if hit_rate_confirmed is not None else None,
+        total_pnl_confirmed_synthetic=round(total_pnl_confirmed, 2) if total_pnl_confirmed is not None else None,
+        mean_pnl_per_trade_confirmed_synthetic=round(mean_pnl_confirmed, 4) if mean_pnl_confirmed is not None else None,
+        max_drawdown_confirmed_synthetic=round(max_dd_confirmed, 2) if max_dd_confirmed is not None else None,
     )

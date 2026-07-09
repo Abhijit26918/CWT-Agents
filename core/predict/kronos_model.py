@@ -61,15 +61,20 @@ def get_predictor(cfg) -> Any:
 # Timestamp helpers
 # ---------------------------------------------------------------------------
 
-def _build_timestamps(open_times_s: pd.Series, interval_seconds: int):
+def _build_timestamps(open_times_s: pd.Series, interval_seconds: int, pred_len: int = 1):
     """Return (x_timestamp, y_timestamp) as timezone-naive pandas Series.
+
+    y_timestamp has `pred_len` entries — Kronos forecasts autoregressively out
+    to y_timestamp[-1], so pred_len>1 gives a genuine N-steps-ahead forecast,
+    not just N repeated 1-step calls.
 
     Kronos's calc_time_stamps expects a Series (uses .dt accessor), not a
     DatetimeIndex, so we pass pd.Series in both cases.
     """
     x_ts = pd.to_datetime(open_times_s.astype("int64"), unit="s")
-    next_s = int(open_times_s.iloc[-1]) + interval_seconds
-    y_ts = pd.to_datetime(pd.Series([next_s]), unit="s")
+    last = int(open_times_s.iloc[-1])
+    future_secs = [last + interval_seconds * (i + 1) for i in range(pred_len)]
+    y_ts = pd.to_datetime(pd.Series(future_secs), unit="s")
     return x_ts, y_ts
 
 
@@ -84,26 +89,43 @@ def predict_move(
     df: pd.DataFrame,
     cfg,
     predictor: Any | None = None,
+    interval_override: str | None = None,
+    pred_len: int = 1,
 ) -> float:
-    """Return P(up) for the next bar using Monte-Carlo sampling over Kronos.
+    """Return P(up) N bars ahead using Monte-Carlo sampling over Kronos.
 
     Args:
-        df:        Full OHLCV DataFrame (up to 1000 rows).
-        cfg:       AppConfig — uses cfg.kronos.lookback, mc_samples, etc.
-        predictor: Injectable predictor for testing (FakePredictor). If None,
-                   loads the real Kronos model via get_predictor(cfg).
+        df:                Full OHLCV DataFrame (up to 1000 rows).
+        cfg:               AppConfig — uses cfg.kronos.lookback, mc_samples, etc.
+        predictor:         Injectable predictor for testing (FakePredictor). If
+                           None, loads the real Kronos model via get_predictor(cfg).
+        interval_override: Run against a different bar interval than
+                           cfg.ohlcv_interval (e.g. "1m" for a delayed-confirmation
+                           check) without needing a whole separate AppConfig. The
+                           model itself is timeframe-agnostic — only the implied
+                           forecast timestamps change.
+        pred_len:          Number of bars ahead to forecast, autoregressively
+                           (Kronos natively supports multi-step generation — see
+                           vendor/Kronos/model/kronos.py::KronosPredictor.predict).
+                           Default 1 = next bar. A 1m confirmation model checking
+                           the same ~5-minute-ahead horizon as a 5m:n+1 prediction
+                           should use pred_len=5, not the default — comparing a
+                           5-minute-ahead call against a 1-minute-ahead call would
+                           be comparing two different horizons, not confirming
+                           the same forecast with fresher data.
 
     Returns:
-        float in [0, 1] — fraction of MC samples predicting close > last_close.
+        float in [0, 1] — fraction of MC samples predicting the pred_len-th
+        bar's close > last_close.
     """
     k = cfg.kronos
-    interval_secs = _INTERVAL_SECONDS.get(cfg.ohlcv_interval, 300)
+    interval_secs = _INTERVAL_SECONDS.get(interval_override or cfg.ohlcv_interval, 300)
 
     # Slice to Kronos context cap (≤512 for small/base, ≤2048 for mini)
     lookback = df.tail(k.lookback).copy()
     last_close = float(lookback["close"].iloc[-1])
 
-    x_ts, y_ts = _build_timestamps(lookback["open_time"], interval_secs)
+    x_ts, y_ts = _build_timestamps(lookback["open_time"], interval_secs, pred_len=pred_len)
 
     if predictor is None:
         predictor = get_predictor(cfg)
@@ -114,7 +136,7 @@ def predict_move(
             df=lookback[["open", "high", "low", "close", "volume", "amount"]],
             x_timestamp=x_ts,
             y_timestamp=y_ts,
-            pred_len=1,
+            pred_len=pred_len,
             T=1.0,
             top_p=0.9,
             sample_count=1,
@@ -125,7 +147,7 @@ def predict_move(
 
     p_up = ups / k.mc_samples
     logger.debug(
-        "Kronos MC: %d/%d samples UP → p_up=%.3f (last_close=%.4f)",
-        ups, k.mc_samples, p_up, last_close,
+        "Kronos MC: %d/%d samples UP → p_up=%.3f (last_close=%.4f, pred_len=%d)",
+        ups, k.mc_samples, p_up, last_close, pred_len,
     )
     return p_up
