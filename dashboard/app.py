@@ -78,6 +78,31 @@ def _load_recent_resolved(conn) -> pd.DataFrame:
     )
 
 
+def _load_pending_candidates(conn) -> pd.DataFrame:
+    return pd.read_sql_query(
+        """SELECT asset, venue, side, model_p_up, stake_paper, confirm_at_ts, created_at
+           FROM predictions
+           WHERE status = 'PENDING_CONFIRM'
+           ORDER BY confirm_at_ts ASC""",
+        conn,
+    )
+
+
+def _load_confirmation_history(conn) -> pd.DataFrame:
+    """Candidates that have gone through the delayed-confirmation check —
+    shows the 5m candidate's model_p_up next to the 1m:n+5 confirmation's
+    model_p_up_1m, and whether that agreement placed (OPEN/RESOLVED) or
+    dropped (REJECTED) the trade."""
+    return pd.read_sql_query(
+        """SELECT asset, venue, side, model_p_up, model_p_up_1m, status, created_at
+           FROM predictions
+           WHERE confirm_at_ts IS NOT NULL AND model_p_up_1m IS NOT NULL
+           ORDER BY created_at DESC
+           LIMIT 30""",
+        conn,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
@@ -119,8 +144,41 @@ else:
         colour = {"UP": "#1a9e40", "DOWN": "#d62728", "NONE": "#888888"}.get(val, "")
         return f"color: {colour}; font-weight: bold"
 
-    styled = open_df.style.applymap(_colour_side, subset=["side"])
+    styled = open_df.style.map(_colour_side, subset=["side"])
     st.dataframe(styled, use_container_width=True)
+
+st.divider()
+
+# ── Delayed confirmation flow ───────────────────────────────────────────────
+st.subheader("Delayed Confirmation Flow (5m candidate → 1m:n+5 re-check)")
+pending_df = _load_pending_candidates(conn)
+confirm_hist_df = _load_confirmation_history(conn)
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Pending confirmation", len(pending_df))
+if not confirm_hist_df.empty:
+    c2.metric("Confirmed (placed)", int((confirm_hist_df["status"] != "REJECTED").sum()))
+    c3.metric("Rejected (dropped)", int((confirm_hist_df["status"] == "REJECTED").sum()))
+else:
+    c2.metric("Confirmed (placed)", 0)
+    c3.metric("Rejected (dropped)", 0)
+
+if not pending_df.empty:
+    st.caption("Candidates parked, waiting for their 1m:n+5 confirmation check:")
+    st.dataframe(pending_df, use_container_width=True)
+
+if not confirm_hist_df.empty:
+    st.caption("Recent confirmation decisions — model_p_up (5m candidate) vs. "
+               "model_p_up_1m (1-minute, 5-steps-ahead re-check):")
+    def _colour_status(val):
+        colour = {"REJECTED": "#d62728"}.get(val, "#1a9e40")
+        return f"color: {colour}; font-weight: bold"
+    st.dataframe(
+        confirm_hist_df.style.map(_colour_status, subset=["status"]),
+        use_container_width=True,
+    )
+elif pending_df.empty:
+    st.info("No confirmation activity yet — run `python run_flow.py --confirm --loop`.")
 
 st.divider()
 
