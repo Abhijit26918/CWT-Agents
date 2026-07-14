@@ -1,14 +1,30 @@
 # CWT Crypto Predictions Agent
 
-Backend Python agent that runs a 5-stage crypto prediction pipeline every 5 minutes:
+A crypto prediction pipeline (Polymarket/Kalshi odds → Kronos foundation model
+→ Kelly-sized paper trade → self-scoring feedback loop) with a walk-forward
+backtester that replays the exact same production code path over historical
+data, and a live paper-trading loop with a real-time dashboard.
+
+**Highlights:**
+- **Caught its own bugs, provably.** A live/backtest discrepancy (backtest
+  looked fine, live hit rate was worse than random) led to finding a genuine
+  look-ahead data-leakage bug — traced via a statistical asymmetry (one side
+  losing 43/47 times), not luck. Full writeup: [BACKTEST_RESULTS.md](BACKTEST_RESULTS.md).
+- **Backtest and live share one code path.** The backtester replays
+  `predict_move` + `size_position` directly — no parallel/duplicated logic
+  that could silently drift from production.
+- **98 tests, all offline** — no network or API calls required to verify the
+  pipeline works.
+
+Runs a 5-stage prediction cycle every 5 minutes:
 
 1. **Market Agent** — finds BTC/ETH up/down markets on Polymarket (5m) and Kalshi (15m/hourly), reads implied probabilities
-2. **Data Agent** — fetches the last 1000 OHLCV bars via Apify/Binance (free tier)
+2. **Data Agent** — fetches OHLCV via Apify/Binance (free tier)
 3. **Prediction Agent** — runs Kronos K-line foundation model (Monte-Carlo → P(up))
 4. **Risk Agent** — sizes a paper position with fractional Kelly criterion
 5. **Feedback Agent** — after each window resolves, scores predictions, updates Brier score, recalibrates Kelly multiplier
 
-**Scaling features:** cross-venue arbitrage detection (Polymarket vs Kalshi), cross-horizon consistency check (15m vs 3×5m), Streamlit dashboard.
+**Scaling features:** cross-venue arbitrage detection (Polymarket vs Kalshi), cross-horizon consistency check (15m vs 3×5m), a delayed-confirmation flow (5m candidate re-checked by a 1-minute model before being placed), Streamlit dashboard.
 
 Built with **Claude Code** in VS Code. Framework: **Hermes Agent** plugin + skill structure (see §Hermes below). LLM: **OpenRouter** free model.
 
@@ -140,8 +156,8 @@ reports/                                       (backtest result JSON — see BAC
 tests/                                         (98 tests, all offline)
 ```
 
-## Submission Notes
+## Notes
 
-- Apify token must be included in the submission email (not in this repo — see `.env.example`)
-- Paper trading only — `--live` flag is intentionally disabled in v1
-- Kronos runs CPU-only (`device: "cpu"` in `config.yaml`); switch to `Kronos-mini` for faster CPU inference
+- Paper trading only — no live-order execution path exists in this codebase.
+- Kronos runs CPU-only (`device: "cpu"` in `config.yaml`); `Kronos-mini` is the fast-on-CPU default, swap in a larger checkpoint if you have GPU.
+- Secrets go in `.env` (see `.env.example`) — never commit real tokens.
